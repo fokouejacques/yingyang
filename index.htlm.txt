@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YingYang - Portail d'Importation Wanslu Shop</title>
+    <!-- Chargement de Tailwind CSS via CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet">
+    <style>
+        /* Configuration et police de base pour un design moderne */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7fafc; /* gray-50 */
+        }
+        .text-shadow {
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        .cta-button {
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .cta-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 10px rgba(234, 88, 12, 0.4); /* shadow for orange-600 */
+        }
+        .product-card {
+            transition: transform 0.3s ease-in-out;
+        }
+        .product-card:hover {
+            transform: scale(1.02);
+        }
+        /* Style pour la modal */
+        .modal {
+            transition: opacity 0.3s ease-in-out;
+        }
+        .modal-active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Structure pour l'initialisation Firebase et Logique de Commande -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, setLogLevel, collection, addDoc, query, where, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // IMPORTANT : Utilisation des variables globales fournies par l'environnement
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        let firebaseConfig;
+        try {
+            firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        } catch (e) {
+            console.error("Erreur de parsing de __firebase_config:", e);
+            firebaseConfig = {};
+        }
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app, db, auth;
+        let userId = 'unknown_user';
+        let isAuthReady = false;
+
+        if (Object.keys(firebaseConfig).length > 0) {
+            try {
+                // Initialisation de Firebase
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                setLogLevel('Debug'); // Afficher les logs de debug
+
+                // Authentification
+                const attemptAuth = async () => {
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    } catch (error) {
+                        console.error("Erreur d'authentification:", error);
+                    }
+                };
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        console.log("Utilisateur connecté ID:", userId);
+                        const userIdDisplay = document.getElementById('userIdDisplay');
+                        if (userIdDisplay) {
+                            userIdDisplay.textContent = `ID Utilisateur: ${userId}`;
+                        }
+                    } else {
+                        // Utiliser un ID aléatoire si déconnecté/anonyme non réussi, même si les règles n'autorisent pas.
+                        // Cependant, l'ID réel pour la lecture sera null si non authentifié. On utilise l'UID s'il existe.
+                        userId = auth.currentUser?.uid || crypto.randomUUID(); 
+                        console.log("Utilisateur non authentifié (ou ID généré):", userId);
+                    }
+                    isAuthReady = true;
+                    // Démarrer le chargement des commandes dès que l'ID utilisateur est établi
+                    if (db && userId) {
+                         // AJUSTEMENT: Lancement avec un petit délai pour assurer la stabilité de l'UID
+                         // avant que la requête onSnapshot ne démarre.
+                         setTimeout(loadUserOrders, 500); 
+                    }
+                });
+
+                attemptAuth(); // Lancer l'authentification
+
+            } catch (error) {
+                console.error("Erreur lors de l'initialisation de Firebase:", error);
+            }
+        }
+        
+        /**
+         * Ouvre la modale de commande et pré-remplit les champs cachés.
+         * @param {string} productId - ID unique du produit (ex: 'montre').
+         * @param {string} productName - Nom affiché du produit (ex: 'Montre Intelligente Sportive').
+         */
+        window.openOrderModal = (productId, productName) => {
+            document.getElementById('modal-product-name').textContent = productName;
+            document.getElementById('modal-product-id').value = productId;
+            document.getElementById('modal-product-title').value = productName;
+            document.getElementById('order-modal').classList.add('modal-active');
+            document.getElementById('modal-message').textContent = ''; // Clear previous message
+        };
+
+        /**
+         * Ferme la modale de commande.
+         */
+        window.closeOrderModal = () => {
+            document.getElementById('order-modal').classList.remove('modal-active');
+        };
+
+        /**
+         * Place la commande en l'enregistrant dans Firestore (simulation d'envoi à Wanslu).
+         */
+        window.placeOrder = async (event) => {
+            event.preventDefault();
+            
+            if (!isAuthReady || userId === 'unknown_user') {
+                document.getElementById('modal-message').textContent = "Authentification en cours, veuillez réessayer.";
+                return;
+            }
+
+            const productId = document.getElementById('modal-product-id').value;
+            const productName = document.getElementById('modal-product-title').value;
+            const quantity = parseInt(document.getElementById('quantity').value, 10);
+            const address = document.getElementById('delivery-address').value.trim();
+
+            const messageElement = document.getElementById('modal-message');
+            messageElement.className = 'text-center mt-4 text-sm font-semibold';
+
+            if (quantity <= 0 || !address) {
+                messageElement.textContent = "Veuillez entrer une quantité valide et une adresse de livraison.";
+                messageElement.classList.add('text-red-600');
+                return;
+            }
+
+            const orderData = {
+                productId: productId,
+                productName: productName,
+                quantity: quantity,
+                deliveryAddress: address,
+                userId: userId,
+                appId: appId,
+                timestamp: new Date(),
+                status: 'Commande reçue par YingYang (En attente de transmission à Wanslu)',
+                // Simule l'intégration d'affiliation pour le suivi
+                wansluRef: 'YingYang' 
+            };
+
+            const loader = document.getElementById('modal-loader');
+            loader.classList.remove('hidden');
+            document.getElementById('order-submit-btn').disabled = true;
+
+            try {
+                // Chemin de collection pour les commandes publiques partagées (si YingYang gère le traitement)
+                const ordersCollectionRef = collection(db, `artifacts/${appId}/public/data/orders`);
+                
+                // Sauvegarde de la commande
+                await addDoc(ordersCollectionRef, orderData);
+
+                // Succès
+                messageElement.textContent = `Félicitations ! Votre commande de ${quantity} x "${productName}" a été enregistrée. Elle est automatiquement transmise à Wanslu Shop à l'adresse fournie.`;
+                messageElement.classList.remove('text-red-600');
+                messageElement.classList.add('text-green-600');
+                
+                // Optionnel: Vider le formulaire après succès
+                document.getElementById('order-form').reset();
+                document.getElementById('modal-product-id').value = productId; // Keep hidden ID for context
+                document.getElementById('modal-product-title').value = productName; 
+                
+                // Fermer la modal après un court délai pour que l'utilisateur lise le message de succès
+                setTimeout(closeOrderModal, 3000);
+
+            } catch (e) {
+                console.error("Erreur lors du placement de la commande (Firestore): ", e);
+                messageElement.textContent = "Erreur: Impossible de passer la commande. Veuillez vérifier votre connexion.";
+                messageElement.classList.remove('text-green-600');
+                messageElement.classList.add('text-red-600');
+            } finally {
+                loader.classList.add('hidden');
+                document.getElementById('order-submit-btn').disabled = false;
+            }
+        };
+
+        // Fermer la modal en cliquant en dehors
+        document.addEventListener('DOMContentLoaded', () => {
+            const modal = document.getElementById('order-modal');
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) {
+                    closeOrderModal();
+                }
+            });
+        });
+
+        // --- Logique de Suivi des Commandes ---
+
+        /**
+         * Met à jour dynamiquement la liste des commandes de l'utilisateur.
+         */
+        const renderOrders = (orders) => {
+            const container = document.getElementById('orders-list-container');
+            if (!container) return;
+            
+            if (orders.length === 0) {
+                container.innerHTML = `
+                    <div class="text-center p-8 bg-white rounded-lg shadow-inner border border-gray-200">
+                        <p class="text-lg text-gray-600">Vous n'avez pas encore de commandes enregistrées via YingYang.</p>
+                        <a href="#produits" class="text-indigo-600 font-medium mt-2 inline-block hover:text-indigo-800 transition duration-150">Commencez à commander ici.</a>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = orders.map(order => {
+                // S'assurer que timestamp est un objet Date ou est converti
+                const date = order.timestamp && order.timestamp.toDate ? order.timestamp.toDate() : new Date();
+                const formattedDate = date.toLocaleDateString('fr-FR', {
+                    year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+                });
+                
+                // Définir la couleur du statut
+                let statusColor = 'bg-gray-200 text-gray-800';
+                if (order.status.includes('reçue') || order.status.includes('En attente')) {
+                    statusColor = 'bg-yellow-100 text-yellow-800';
+                } else if (order.status.includes('transmise') || order.status.includes('traitement')) {
+                    statusColor = 'bg-blue-100 text-blue-800';
+                } else if (order.status.includes('livraison') || order.status.includes('expédiée')) {
+                    statusColor = 'bg-green-100 text-green-800';
+                } else if (order.status.includes('annulée') || order.status.includes('échec')) {
+                    statusColor = 'bg-red-100 text-red-800';
+                }
+
+                return `
+                    <div class="bg-white p-6 rounded-xl shadow-lg border-l-4 border-indigo-500 hover:shadow-xl transition duration-200 mb-6">
+                        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-3">
+                            <h4 class="text-xl font-bold text-indigo-700">${order.productName} <span class="text-gray-500 font-normal text-base">x${order.quantity}</span></h4>
+                            <span class="mt-2 sm:mt-0 px-3 py-1 text-xs font-semibold rounded-full ${statusColor}">${order.status}</span>
+                        </div>
+                        <div class="text-sm text-gray-600 space-y-1 mt-3">
+                            <p><strong>Date:</strong> ${formattedDate}</p>
+                            <p><strong>ID Commande:</strong> ${order.orderId.substring(0, 8)}...</p>
+                            <p><strong>Livraison:</strong> <span class="text-gray-900 font-medium">${order.deliveryAddress}</span></p>
+                            <p class="text-xs italic text-gray-500">Référence Wanslu: ${order.wansluRef}</p>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        };
+
+        /**
+         * Écoute en temps réel les commandes de l'utilisateur connecté.
+         */
+        const loadUserOrders = () => {
+            // CORRECTION: AJOUT d'une vérification stricte pour s'assurer que userId est prêt
+            if (!db || !userId || userId === 'unknown_user') {
+                 console.log("Impossible de charger les commandes: DB ou UserID non prêt.");
+                 // Optionnel: Mettre un message à l'utilisateur si l'ID n'est pas prêt
+                 document.getElementById('orders-list-container').innerHTML = `
+                    <div class="text-center p-8 bg-yellow-50 rounded-lg shadow-inner border border-yellow-200">
+                        <p class="text-lg text-yellow-700">Veuillez patienter pendant l'initialisation de l'utilisateur pour afficher vos commandes.</p>
+                    </div>
+                 `;
+                 return;
+            }
+
+            const ordersCollectionRef = collection(db, `artifacts/${appId}/public/data/orders`);
+            
+            // Requête pour filtrer uniquement les commandes de l'utilisateur actuel
+            const userOrdersQuery = query(ordersCollectionRef, where('userId', '==', userId));
+
+            // Écoute en temps réel
+            onSnapshot(userOrdersQuery, (snapshot) => {
+                const orders = [];
+                snapshot.forEach(doc => {
+                    orders.push({
+                        orderId: doc.id,
+                        ...doc.data()
+                    });
+                });
+                
+                // Tri par date de la plus récente à la plus ancienne
+                orders.sort((a, b) => {
+                    const timeA = a.timestamp && a.timestamp.toMillis ? a.timestamp.toMillis() : 0;
+                    const timeB = b.timestamp && b.timestamp.toMillis ? b.timestamp.toMillis() : 0;
+                    return timeB - timeA;
+                });
+
+                renderOrders(orders);
+            }, (error) => {
+                // Affichage de l'erreur pour l'utilisateur
+                console.error("Erreur lors de l'écoute des commandes:", error);
+                document.getElementById('orders-list-container').innerHTML = `<p class="text-red-500 text-center p-4 bg-red-100 rounded-lg border border-red-300">
+                    Erreur de chargement des commandes. ${error.message}. <br> Vérifiez l'authentification et les règles de sécurité.
+                </p>`;
+            });
+        };
+        
+
+    </script>
+
+    <!-- Navigation -->
+    <header class="bg-white shadow-md sticky top-0 z-10">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
+            <h1 class="text-3xl font-extrabold">
+                <span class="text-indigo-600">Ying</span><span class="text-orange-500">Yang</span>
+            </h1>
+            <nav class="hidden md:flex space-x-8">
+                <a href="#accueil" class="text-gray-600 hover:text-indigo-600 transition duration-150">Accueil</a>
+                <a href="#avantages" class="text-gray-600 hover:text-indigo-600 transition duration-150">Avantages</a>
+                <a href="#produits" class="text-gray-600 hover:text-indigo-600 transition duration-150 font-bold">Produits Phares</a>
+                <a href="#suivi-commandes" class="text-gray-600 hover:text-indigo-600 transition duration-150 font-bold">Suivi</a>
+                <a href="#inscription" class="text-gray-600 hover:text-indigo-600 transition duration-150 font-bold">Inscription Wanslu</a>
+            </nav>
+            <a href="#inscription" class="md:hidden bg-orange-500 text-white px-4 py-2 rounded-full text-sm font-medium hover:bg-orange-600 transition duration-150 shadow-lg">S'inscrire (Wanslu)</a>
+        </div>
+    </header>
+
+    <main>
+        <!-- Section Héro / Accueil -->
+        <section id="accueil" class="bg-indigo-600 text-white py-20 md:py-32">
+            <div class="max-w-4xl mx-auto text-center px-4">
+                <h2 class="text-5xl md:text-6xl font-black mb-4 text-shadow leading-tight">
+                    YingYang : Le Portail pour l'Importation de Chine
+                </h2>
+                <p class="text-xl md:text-2xl mb-8 opacity-90">
+                    Propulsé par **Wanslu Shop** – Plus de 3 millions de fournisseurs vérifiés. Livraison et dédouanement **dans votre pays et partout dans le monde**.
+                </p>
+                <button onclick="document.getElementById('produits').scrollIntoView({ behavior: 'smooth' });" class="cta-button inline-block bg-orange-500 text-white font-bold text-lg px-10 py-4 rounded-full shadow-2xl hover:bg-orange-600">
+                    Commander nos Produits Tendance
+                </button>
+            </div>
+        </section>
+
+        <!-- Section Avantages Clés -->
+        <section id="avantages" class="py-16 md:py-24 bg-white">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <h3 class="text-4xl font-extrabold text-center text-gray-900 mb-12">
+                    Les Avantages Wanslu Shop (Via YingYang)
+                </h3>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
+
+                    <!-- Avantage 1: Fournisseurs -->
+                    <div class="bg-gray-50 p-6 rounded-xl shadow-lg hover:shadow-xl transition duration-300">
+                        <div class="text-4xl text-indigo-600 mb-4">🛒</div>
+                        <h4 class="text-xl font-bold mb-2 text-gray-800">Accès au Marché Mondial</h4>
+                        <p class="text-gray-600">Commandez auprès de plus de **3 millions de fournisseurs Wanslu Shop** directement de Chine, au prix de gros.</p>
+                    </div>
+
+                    <!-- Avantage 2: Logistique/Dédouanement -->
+                    <div class="bg-gray-50 p-6 rounded-xl shadow-lg hover:shadow-xl transition duration-300">
+                        <div class="text-4xl text-indigo-600 mb-4">📦</div>
+                        <h4 class="text-xl font-bold mb-2 text-gray-800">Dédouanement Simplifié Global</h4>
+                        <p class="text-gray-600">**Pas besoin d'agent de transit**. Wanslu Shop s'occupe du dédouanement et de la livraison **dans votre pays et partout dans le monde**.</p>
+                    </div>
+
+                    <!-- Avantage 3: MOQ/Quantités -->
+                    <div class="bg-gray-50 p-6 rounded-xl shadow-lg hover:shadow-xl transition duration-300">
+                        <div class="text-4xl text-indigo-600 mb-4">☝️</div>
+                        <h4 class="text-xl font-bold mb-2 text-gray-800">Faibles Quantités Minimales</h4>
+                        <p class="text-gray-600">Vous pouvez commander à partir d'un **minimum de 1 unité** auprès de plusieurs fournisseurs à la fois.</p>
+                    </div>
+
+                    <!-- Avantage 4: Paiement Local -->
+                    <div class="bg-gray-50 p-6 rounded-xl shadow-lg hover:shadow-xl transition duration-300">
+                        <div class="text-4xl text-indigo-600 mb-4">💰</div>
+                        <h4 class="text-xl font-bold mb-2 text-gray-800">Paiement Facile & Local</h4>
+                        <p class="text-gray-600">Payez vos commandes Wanslu Shop en toute simplicité avec **Orange Money, MTN Money**, et autres options locales.</p>
+                    </div>
+
+                </div>
+            </div>
+        </section>
+        
+        <!-- SECTION PRODUITS PHARES AVEC BOUTONS DE COMMANDE LOCALE -->
+        <section id="produits" class="py-16 md:py-24 bg-indigo-50">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <h3 class="text-4xl font-extrabold text-center text-indigo-800 mb-12">
+                    Commandez les Produits Tendances (Livraison via Wanslu Shop)
+                </h3>
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8">
+                    
+                    <!-- Produit 1: Montre Connectée (TECH) -->
+                    <div class="product-card bg-white rounded-xl shadow-xl overflow-hidden">
+                        <img src="https://placehold.co/600x400/3B82F6/ffffff?text=Montre+Connect%C3%A9e" alt="Montre Connectée de Chine" class="w-full h-48 object-cover">
+                        <div class="p-6">
+                            <h4 class="text-xl font-bold text-gray-900 mb-2">Montre Intelligente Sportive</h4>
+                            <p class="text-gray-600 mb-4 text-sm">Fournisseur Vérifié. Prix de gros incroyable pour une quantité minimale de 3 unités.</p>
+                            <span class="inline-block bg-orange-100 text-orange-800 text-xs font-semibold px-3 py-1 rounded-full mb-4">Électronique</span>
+                            <button onclick="openOrderModal('montre', 'Montre Intelligente Sportive')" class="block w-full text-center bg-indigo-600 text-white font-semibold py-2 rounded-lg hover:bg-indigo-700 transition duration-150">
+                                Commander sur YingYang
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Produit 2: Sac à Dos Tendance (MODE) -->
+                    <div class="product-card bg-white rounded-xl shadow-xl overflow-hidden">
+                        <img src="https://placehold.co/600x400/EC4899/ffffff?text=Sac+%C3%A0+Dos+Mode" alt="Sac à Dos de Chine" class="w-full h-48 object-cover">
+                        <div class="p-6">
+                            <h4 class="text-xl font-bold text-gray-900 mb-2">Sac à Dos Unisexe Anti-vol</h4>
+                            <p class="text-gray-600 mb-4 text-sm">Parfait pour le B2C. MOQ seulement 1 unité. Expédition rapide et dédouanée.</p>
+                            <span class="inline-block bg-orange-100 text-orange-800 text-xs font-semibold px-3 py-1 rounded-full mb-4">Mode & Accessoires</span>
+                            <button onclick="openOrderModal('sacados', 'Sac à Dos Unisexe Anti-vol')" class="block w-full text-center bg-indigo-600 text-white font-semibold py-2 rounded-lg hover:bg-indigo-700 transition duration-150">
+                                Commander sur YingYang
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Produit 3: Robot de Cuisine (MAISON) -->
+                    <div class="product-card bg-white rounded-xl shadow-xl overflow-hidden">
+                        <img src="https://placehold.co/600x400/10B981/ffffff?text=Robot+Cuisine" alt="Robot de Cuisine de Chine" class="w-full h-48 object-cover">
+                        <div class="p-6">
+                            <h4 class="text-xl font-bold text-gray-900 mb-2">Robot de Cuisine Multifonction</h4>
+                            <p class="text-gray-600 mb-4 text-sm">Un Best-seller pour la revente locale. Payez avec MTN/Orange Money.</p>
+                            <span class="inline-block bg-orange-100 text-orange-800 text-xs font-semibold px-3 py-1 rounded-full mb-4">Maison & Cuisine</span>
+                            <button onclick="openOrderModal('robotcuisine', 'Robot de Cuisine Multifonction')" class="block w-full text-center bg-indigo-600 text-white font-semibold py-2 rounded-lg hover:bg-indigo-700 transition duration-150">
+                                Commander sur YingYang
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Produit 4: Projecteur Portable 4K (TECH/LOISIR) -->
+                    <div class="product-card bg-white rounded-xl shadow-xl overflow-hidden">
+                        <img src="https://placehold.co/600x400/5B21B6/ffffff?text=Projecteur+Portable" alt="Projecteur Portable 4K" class="w-full h-48 object-cover">
+                        <div class="p-6">
+                            <h4 class="text-xl font-bold text-gray-900 mb-2">Mini Projecteur LED 4K Portable</h4>
+                            <p class="text-gray-600 mb-4 text-sm">Idéal pour les présentations ou le divertissement à domicile. Faible MOQ.</p>
+                            <span class="inline-block bg-orange-100 text-orange-800 text-xs font-semibold px-3 py-1 rounded-full mb-4">Électronique</span>
+                            <button onclick="openOrderModal('projecteur', 'Mini Projecteur LED 4K Portable')" class="block w-full text-center bg-indigo-600 text-white font-semibold py-2 rounded-lg hover:bg-indigo-700 transition duration-150">
+                                Commander sur YingYang
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Produit 5: Chaussures de Sport Respirantes (MODE) -->
+                    <div class="product-card bg-white rounded-xl shadow-xl overflow-hidden">
+                        <img src="https://placehold.co/600x400/F59E0B/ffffff?text=Chaussures+Sport" alt="Chaussures de Sport Respirantes" class="w-full h-48 object-cover">
+                        <div class="p-6">
+                            <h4 class="text-xl font-bold text-gray-900 mb-2">Chaussures de Running Tissu Mesh</h4>
+                            <p class="text-gray-600 mb-4 text-sm">Meilleur rapport qualité-prix en gros. Large gamme de tailles disponible.</p>
+                            <span class="inline-block bg-orange-100 text-orange-800 text-xs font-semibold px-3 py-1 rounded-full mb-4">Mode & Chaussures</span>
+                            <button onclick="openOrderModal('chaussures', 'Chaussures de Running Tissu Mesh')" class="block w-full text-center bg-indigo-600 text-white font-semibold py-2 rounded-lg hover:bg-indigo-700 transition duration-150">
+                                Commander sur YingYang
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Produit 6: Drone Pliable Professionnel (TECH/LOISIR) -->
+                    <div class="product-card bg-white rounded-xl shadow-xl overflow-hidden">
+                        <img src="https://placehold.co/600x400/9333EA/ffffff?text=Drone+Pliable" alt="Drone Pliable Professionnel" class="w-full h-48 object-cover">
+                        <div class="p-6">
+                            <h4 class="text-xl font-bold text-gray-900 mb-2">Drone Caméra HD avec GPS</h4>
+                            <p class="text-gray-600 mb-4 text-sm">Le produit de loisir/pro qui cartonne. Dédouanement sécurisé inclus.</p>
+                            <span class="inline-block bg-orange-100 text-orange-800 text-xs font-semibold px-3 py-1 rounded-full mb-4">Loisirs & Tech</span>
+                            <button onclick="openOrderModal('drone', 'Drone Caméra HD avec GPS')" class="block w-full text-center bg-indigo-600 text-white font-semibold py-2 rounded-lg hover:bg-indigo-700 transition duration-150">
+                                Commander sur YingYang
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Produit 7: Kit de Maquillage Complet (BEAUTÉ) -->
+                    <div class="product-card bg-white rounded-xl shadow-xl overflow-hidden">
+                        <img src="https://placehold.co/600x400/F472B6/ffffff?text=Kit+Maquillage" alt="Kit de Maquillage Complet" class="w-full h-48 object-cover">
+                        <div class="p-6">
+                            <h4 class="text-xl font-bold text-gray-900 mb-2">Palette de Maquillage Professionnelle</h4>
+                            <p class="text-gray-600 mb-4 text-sm">Prix compétitif pour la revente dans le secteur de la beauté. Colis groupés.</p>
+                            <span class="inline-block bg-orange-100 text-orange-800 text-xs font-semibold px-3 py-1 rounded-full mb-4">Beauté & Santé</span>
+                            <button onclick="openOrderModal('maquillage', 'Palette de Maquillage Professionnelle')" class="block w-full text-center bg-indigo-600 text-white font-semibold py-2 rounded-lg hover:bg-indigo-700 transition duration-150">
+                                Commander sur YingYang
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- Produit 8: Outils Électriques Sans Fil (OUTILS) -->
+                    <div class="product-card bg-white rounded-xl shadow-xl overflow-hidden">
+                        <img src="https://placehold.co/600x400/4B5563/ffffff?text=Perceuse+Sans+Fil" alt="Outils Électriques Sans Fil" class="w-full h-48 object-cover">
+                        <div class="p-6">
+                            <h4 class="text-xl font-bold text-gray-900 mb-2">Perceuse Visseuse Sans Fil Puissante</h4>
+                            <p class="text-gray-600 mb-4 text-sm">Fournisseurs d'outillage de qualité industrielle. Parfait pour les quincailleries.</p>
+                            <span class="inline-block bg-orange-100 text-orange-800 text-xs font-semibold px-3 py-1 rounded-full mb-4">Outils & Bricolage</span>
+                            <button onclick="openOrderModal('outils', 'Perceuse Visseuse Sans Fil Puissante')" class="block w-full text-center bg-indigo-600 text-white font-semibold py-2 rounded-lg hover:bg-indigo-700 transition duration-150">
+                                Commander sur YingYang
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Produit 9: Couette en Coton Bio (MAISON/TEXTILE) -->
+                    <div class="product-card bg-white rounded-xl shadow-xl overflow-hidden">
+                        <img src="https://placehold.co/600x400/A78BFA/ffffff?text=Couette+Coton" alt="Couette en Coton Bio" class="w-full h-48 object-cover">
+                        <div class="p-6">
+                            <h4 class="text-xl font-bold text-gray-900 mb-2">Linge de Lit Luxe, Coton Bio 400 Fils</h4>
+                            <p class="text-gray-600 mb-4 text-sm">Importation de produits textiles de haute qualité. Dédouanement facile.</p>
+                            <span class="inline-block bg-orange-100 text-orange-800 text-xs font-semibold px-3 py-1 rounded-full mb-4">Maison & Textile</span>
+                            <button onclick="openOrderModal('couette', 'Linge de Lit Luxe, Coton Bio 400 Fils')" class="block w-full text-center bg-indigo-600 text-white font-semibold py-2 rounded-lg hover:bg-indigo-700 transition duration-150">
+                                Commander sur YingYang
+                            </button>
+                        </div>
+                    </div>
+
+
+                </div>
+                <div class="text-center mt-12">
+                    <p class="text-lg text-indigo-800 font-medium mb-4">
+                        Toutes les commandes passées ici sont automatiquement transmises à Wanslu Shop avec votre adresse pour une livraison rapide.
+                    </p>
+                </div>
+            </div>
+        </section>
+        
+        <!-- SECTION SUIVI DES COMMANDES -->
+        <section id="suivi-commandes" class="py-16 md:py-24 bg-white">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <h3 class="text-4xl font-extrabold text-center text-indigo-800 mb-4">
+                    Suivi de Vos Commandes YingYang
+                </h3>
+                <p class="text-xl text-gray-600 text-center mb-12">
+                    Visualisez le statut en temps réel des commandes que vous avez transmises à Wanslu Shop.
+                </p>
+
+                <!-- Conteneur pour la liste des commandes, géré par JS -->
+                <div id="orders-list-container" class="max-w-3xl mx-auto">
+                    <!-- Les commandes seront injectées ici par loadUserOrders() -->
+                    <div class="text-center p-8 bg-gray-100 rounded-xl shadow">
+                        <div class="animate-spin inline-block w-6 h-6 border-4 border-indigo-500 border-t-transparent rounded-full mr-3" role="status"></div>
+                        <p class="text-gray-500 inline-block">Chargement de vos commandes...</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section Inscription et Instructions (POINT CRUCIAL) -->
+        <section id="inscription" class="py-16 md:py-24 bg-indigo-50">
+            <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+                <h3 class="text-4xl font-extrabold text-indigo-800 mb-4">
+                    Inscription et Activation de Votre Compte Wanslu Shop
+                </h3>
+                <p class="text-xl text-gray-600 mb-12">
+                    L'inscription à Wanslu Shop est toujours nécessaire pour le suivi et le paiement final des commandes que nous transmettons :
+                </p>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-8 text-left">
+
+                    <!-- Étape 1: Télécharger/Visiter -->
+                    <div class="bg-white p-6 rounded-2xl shadow-xl border-t-4 border-orange-500">
+                        <div class="text-5xl font-extrabold text-orange-500 mb-2">1</div>
+                        <h4 class="text-2xl font-semibold mb-3 text-indigo-600">Accès à la Plateforme Wanslu Shop</h4>
+                        <p class="text-gray-700">
+                            Téléchargez l'application **Wanslu Shop** ou utilisez le site web
+                            <a href="http://www.wanslu.shop" target="_blank" class="text-indigo-600 underline hover:text-indigo-800">www.wanslu.shop</a>.
+                        </p>
+                    </div>
+
+                    <!-- Étape 2: Remplir le formulaire -->
+                    <div class="bg-white p-6 rounded-2xl shadow-xl border-t-4 border-orange-500">
+                        <div class="text-5xl font-extrabold text-orange-500 mb-2">2</div>
+                        <h4 class="text-2xl font-semibold mb-3 text-indigo-600">Création du Compte Utilisateur</h4>
+                        <p class="text-gray-700">
+                            Sur l'interface Wanslu Shop, cliquez sur **Compte**, puis **Inscription**. Remplissez toutes les informations.
+                        </p>
+                    </div>
+
+                    <!-- Étape 3: Validation Email (CRUCIAL) -->
+                    <div class="bg-white p-6 rounded-2xl shadow-xl border-t-4 border-red-500">
+                        <div class="text-5xl font-extrabold text-red-500 mb-2">3</div>
+                        <h4 class="text-2xl font-semibold mb-3 text-indigo-600">Validation Obligatoire (VERIFY)</h4>
+                        <p class="text-gray-700 font-bold">
+                            <span class="text-red-600">IMPORTANT :</span> Cliquez sur **"VERIFY"** dans le message de confirmation Wanslu Shop.
+                        </p>
+                    </div>
+
+                </div>
+
+                <a href="http://www.wanslu.shop" target="_blank" class="cta-button inline-block mt-12 bg-indigo-600 text-white font-bold text-xl px-12 py-5 rounded-full shadow-2xl hover:bg-indigo-700">
+                    Je Commence Mon Inscription Wanslu Shop Maintenant
+                </a>
+                <p id="userIdDisplay" class="mt-4 text-sm text-gray-400">ID Utilisateur: En attente...</p>
+            </div>
+        </section>
+
+    </main>
+    
+    <!-- MODALE DE COMMANDE (Achat sur YingYang) -->
+    <div id="order-modal" class="modal fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center p-4 z-50 opacity-0 pointer-events-none">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg p-8 transform transition-all duration-300 scale-100">
+            <div class="flex justify-between items-start mb-6">
+                <h3 class="text-2xl font-bold text-indigo-600">Passer Commande via YingYang</h3>
+                <button onclick="closeOrderModal()" class="text-gray-400 hover:text-gray-600 text-3xl leading-none">
+                    &times;
+                </button>
+            </div>
+
+            <p class="text-lg font-medium text-gray-800 mb-4">
+                Produit : <span id="modal-product-name" class="text-orange-500">Nom du produit...</span>
+            </p>
+            <p class="text-sm text-gray-600 mb-6">
+                Remplissez le formulaire ci-dessous. Votre commande sera **automatiquement transmise à Wanslu Shop** pour la livraison.
+            </p>
+
+            <form id="order-form" onsubmit="placeOrder(event)">
+                
+                <input type="hidden" id="modal-product-id" name="productId">
+                <input type="hidden" id="modal-product-title" name="productName">
+
+                <div class="mb-4">
+                    <label for="quantity" class="block text-sm font-medium text-gray-700 mb-2">Quantité désirée</label>
+                    <input type="number" id="quantity" name="quantity" min="1" value="1" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 shadow-sm">
+                </div>
+
+                <div class="mb-6">
+                    <label for="delivery-address" class="block text-sm font-medium text-gray-700 mb-2">Adresse de Livraison Complète (Ville, Quartier, Rue, Contact)</label>
+                    <textarea id="delivery-address" name="delivery-address" rows="3" required placeholder="Ex: Douala, Bonamoussadi, Rue 123, Tél: +237 6XXXXXXXX" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 shadow-sm"></textarea>
+                </div>
+
+                <button id="order-submit-btn" type="submit" class="w-full cta-button bg-orange-500 text-white font-bold text-lg px-6 py-3 rounded-lg shadow-lg hover:bg-orange-600 transition duration-150">
+                    Confirmer la Commande & Transmettre à Wanslu
+                </button>
+                
+                <div id="modal-loader" class="hidden text-center mt-4">
+                    <div class="animate-spin inline-block w-6 h-6 border-4 border-indigo-500 border-t-transparent rounded-full" role="status"></div>
+                    <p class="text-sm text-indigo-600 mt-2">Transmission de la commande en cours...</p>
+                </div>
+
+                <p id="modal-message" class="text-center mt-4 text-sm font-semibold"></p>
+
+            </form>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="bg-gray-800 text-white py-10">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-8 mb-8">
+                <div>
+                    <h5 class="text-lg font-bold mb-3 text-orange-500">Navigation</h5>
+                    <ul class="space-y-2 text-sm text-gray-400">
+                        <li><a href="#accueil" class="hover:text-white">Accueil</a></li>
+                        <li><a href="#avantages" class="hover:text-white">Avantages Wanslu</a></li>
+                        <li><a href="#produits" class="hover:text-white">Produits Phares</a></li>
+                        <li><a href="#suivi-commandes" class="hover:text-white">Suivi des Commandes</a></li>
+                        <li><a href="#inscription" class="hover:text-white">S'inscrire (Wanslu)</a></li>
+                    </ul>
+                </div>
+                <div>
+                    <h5 class="text-lg font-bold mb-3 text-orange-500">Contact Wanslu Shop</h5>
+                    <ul class="space-y-2 text-sm text-gray-400">
+                        <li>Email: contact@wanslu.shop</li>
+                        <li>Téléphone: +237 6 XX XX XX XX (Placeholder)</li>
+                    </ul>
+                </div>
+                <div>
+                    <h5 class="text-lg font-bold mb-3 text-orange-500">Paiements Wanslu</h5>
+                    <ul class="space-y-2 text-sm text-gray-400">
+                        <li>Orange Money</li>
+                        <li>MTN Mobile Money</li>
+                        <li>Virement Bancaire</li>
+                    </ul>
+                </div>
+                <div>
+                    <h5 class="text-lg font-bold mb-3 text-orange-500">Ressources</h5>
+                    <ul class="space-y-2 text-sm text-gray-400">
+                        <li><a href="#" class="hover:text-white">FAQ YingYang</a></li>
+                        <li><a href="#" class="hover:text-white">Conditions Générales Wanslu Shop</a></li>
+                        <li><a href="#" class="hover:text-white">Politique de Livraison Wanslu</a></li>
+                    </ul>
+                </div>
+            </div>
+            <div class="border-t border-gray-700 pt-6">
+                <p class="text-sm text-gray-500">
+                    &copy; 2025 YingYang, propulsé par Wanslu Shop. Tous droits réservés.
+                </p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>
